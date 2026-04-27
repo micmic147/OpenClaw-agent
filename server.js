@@ -14,7 +14,7 @@ app.get("/ask", async (req, res) => {
     const response = await axios.post(
       "https://api.anthropic.com/v1/messages",
       {
-        model: "claude-3-haiku-20240307",
+        model: "claude-3-5-sonnet-20241022",
         max_tokens: 300,
         messages: [{ role: "user", content: prompt }]
       },
