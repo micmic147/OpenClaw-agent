@@ -12,33 +12,28 @@ app.get("/ask", async (req, res) => {
 
   try {
     const response = await axios.post(
-      "https://api.anthropic.com/v1/messages",
+      "https://api.openai.com/v1/chat/completions",
       {
-        model: "claude-3-sonnet-20240229",
-        max_tokens: 300,
+        model: "gpt-4o-mini",
         messages: [
-          {
-            role: "user",
-            content: prompt
-          }
+          { role: "user", content: prompt }
         ]
       },
       {
         headers: {
-          "x-api-key": process.env.CLAUDE_API_KEY,
-          "anthropic-version": "2023-06-01",
-          "content-type": "application/json"
+          "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
         }
       }
     );
 
-    const text = response.data.content[0].text;
-
-    res.json({ answer: text });
+    res.json({
+      answer: response.data.choices[0].message.content
+    });
 
   } catch (error) {
     console.error("FULL ERROR:", JSON.stringify(error.response?.data, null, 2));
-    res.status(500).send("Error talking to Claude");
+    res.status(500).send("Error talking to OpenAI");
   }
 });
 
