@@ -31,8 +31,9 @@ app.get("/ask", async (req, res) => {
     });
 
   } catch (error) {
-    res.status(500).send("Error talking to Claude");
-  }
+  console.error("FULL ERROR:", error.response?.data || error.message);
+  res.status(500).send("Error talking to Claude");
+}
 });
 
 app.listen(process.env.PORT || 3000, () => {
