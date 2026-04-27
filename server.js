@@ -16,24 +16,30 @@ app.get("/ask", async (req, res) => {
       {
         model: "claude-3-5-sonnet-20241022",
         max_tokens: 300,
-        messages: [{ role: "user", content: prompt }]
+        messages: [
+          {
+            role: "user",
+            content: prompt
+          }
+        ]
       },
       {
         headers: {
           "x-api-key": process.env.CLAUDE_API_KEY,
-          "anthropic-version": "2023-06-01"
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json"
         }
       }
     );
 
-    res.json({
-      answer: response.data.content[0].text
-    });
+    const text = response.data.content[0].text;
+
+    res.json({ answer: text });
 
   } catch (error) {
-  console.error("FULL ERROR:", error.response?.data || error.message);
-  res.status(500).send("Error talking to Claude");
-}
+    console.error("FULL ERROR:", JSON.stringify(error.response?.data, null, 2));
+    res.status(500).send("Error talking to Claude");
+  }
 });
 
 app.listen(process.env.PORT || 3000, () => {
