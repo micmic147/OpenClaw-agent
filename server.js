@@ -1,87 +1,131 @@
 import express from "express";
 import { Telegraf } from "telegraf";
 import OpenAI from "openai";
+import { createClient } from "@supabase/supabase-js";
+import { tavily } from "@tavily/core";
 import * as dotenv from "dotenv";
+import axios from "axios";
+import pdf from "pdf-parse/lib/pdf-parse.js";
+import * as XLSX from "xlsx";
 
 dotenv.config();
 
-// --- הגדרות ---
+// --- 1. הגדרות וחיבורים ---
 const app = express();
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+const tvly = tavily({ apiKey: process.env.TAVILY_API_KEY });
 
-// אבטחה: רק אתה (מיכאל) יכול להשתמש בבוט
-const ALLOWED_USERS = [291735216]; 
+const ALLOWED_USERS = [291735216]; // ה-ID שלך
 
-// זיכרון: שומר את 10 ההודעות האחרונות של כל משתמש כדי שיהיה הקשר לשיחה
-const sessions = new Map();
+// --- 2. פונקציות עזר (זיכרון, חיפוש, קבצים) ---
 
-function updateHistory(chatId, role, content) {
-    if (!sessions.has(chatId)) sessions.set(chatId, []);
-    const history = sessions.get(chatId);
-    history.push({ role, content });
-    if (history.length > 15) history.shift(); // שומר היסטוריה קצרה ויעילה
+// שמירת הודעה בזיכרון הקבוע של Supabase
+async function saveMessage(chatId, role, content) {
+    await supabase.from('messages').insert([{ chat_id: chatId, role, content }]);
 }
 
-// --- לוגיקה של הבוט ---
+// שליפת היסטוריה מ-Supabase
+async function getHistory(chatId) {
+    const { data } = await supabase
+        .from('messages')
+        .select('role, content')
+        .eq('chat_id', chatId)
+        .order('created_at', { ascending: false })
+        .limit(10);
+    return data ? data.reverse() : [];
+}
+
+// פונקציה לחיפוש באינטרנט
+async function searchWeb(query) {
+    const searchResult = await tvly.search(query, { searchDepth: "advanced" });
+    return searchResult.results.map(r => `${r.title}: ${r.content}`).join("\n");
+}
+
+// --- 3. טיפול בקבצים (PDF/Excel) ---
+
+bot.on(['document', 'photo'], async (ctx) => {
+    const chatId = ctx.chat.id;
+    if (!ALLOWED_USERS.includes(chatId)) return;
+
+    try {
+        await ctx.reply("בודק את הקובץ ששלחת... 🧐");
+        const fileId = ctx.message.document?.file_id || ctx.message.photo?.pop().file_id;
+        const fileUrl = await ctx.telegram.getFileLink(fileId);
+        
+        const response = await axios.get(fileUrl.href, { responseType: 'arraybuffer' });
+        let extractedText = "";
+
+        if (ctx.message.document?.file_name?.endsWith('.pdf')) {
+            const data = await pdf(response.data);
+            extractedText = data.text;
+        } else if (ctx.message.document?.file_name?.endsWith('.xlsx')) {
+            const workbook = XLSX.read(response.data);
+            extractedText = XLSX.utils.sheet_to_txt(workbook.Sheets[workbook.SheetNames[0]]);
+        } else {
+            return ctx.reply("כרגע אני תומך רק ב-PDF או Excel. תמונות אני אוכל לנתח בגרסה הבאה!");
+        }
+
+        const aiRes = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+                { role: "system", content: "ניתוח מסמך: סכם את המידע החשוב מהטקסט הבא בצורה מקצועית." },
+                { role: "user", content: extractedText.substring(0, 5000) } // מגבלה קטנה כדי לא להעמיס
+            ]
+        });
+
+        ctx.reply(aiRes.choices[0].message.content);
+    } catch (err) {
+        ctx.reply("מצטער, הייתה בעיה בקריאת הקובץ.");
+    }
+});
+
+// --- 4. לוגיקה מרכזית (טקסט וחיפוש) ---
 
 bot.on("text", async (ctx) => {
     const chatId = ctx.chat.id;
-    const userMessage = ctx.message.text;
+    const text = ctx.message.text;
 
-    // 1. בדיקת אבטחה
-    if (!ALLOWED_USERS.includes(chatId)) {
-        console.log(`Unauthorized access attempt from ID: ${chatId}`);
-        return ctx.reply("מצטער, הגישה לבוט זה מוגבלת למנהל בלבד.");
-    }
+    if (!ALLOWED_USERS.includes(chatId)) return;
 
     try {
-        // 2. חיווי "מקליד..." בטלגרם
         await ctx.sendChatAction("typing");
 
-        // 3. עדכון זיכרון (הודעת המשתמש)
-        updateHistory(chatId, "user", userMessage);
+        // האם המשתמש רוצה חיפוש? (אם ההודעה מתחילה ב"חפש")
+        let context = "";
+        if (text.startsWith("חפש ")) {
+            const query = text.replace("חפש ", "");
+            await ctx.reply(`מחפש באינטרנט על: ${query}... 🌐`);
+            context = await searchWeb(query);
+        }
 
-        // 4. פנייה ל-OpenAI עם הזיכרון המלא
+        const history = await getHistory(chatId);
+        
         const response = await openai.chat.completions.create({
             model: "gpt-4o-mini",
             messages: [
-                { 
-                  role: "system", 
-                  content: "אתה עוזר אישי אינטליגנטי. אתה מומחה ב-Data Science, SQL ופיתוח No-Code. ענה בעברית מקצועית, קצרה וקולעת." 
-                },
-                ...sessions.get(chatId)
+                { role: "system", content: "אתה עוזר אישי חכם. אם יש הקשר מהאינטרנט, השתמש בו. אם לא, ענה מהידע שלך." },
+                ...history,
+                { role: "user", content: context ? `מידע מהאינטרנט: ${context}\n\nשאלה: ${text}` : text }
             ],
         });
 
-        const aiReply = response.choices[0].message.content;
-
-        // 5. עדכון זיכרון (תשובת ה-AI)
-        updateHistory(chatId, "assistant", aiReply);
-
-        // 6. שליחה חזרה למשתמש
-        await ctx.reply(aiReply);
-
+        const reply = response.choices[0].message.content;
+        
+        await saveMessage(chatId, "user", text);
+        await saveMessage(chatId, "assistant", reply);
+        
+        await ctx.reply(reply);
     } catch (error) {
-        console.error("AI Error:", error.message);
-        ctx.reply("אופס, ה-AI נתקל בשגיאה. כדאי לבדוק את ה-API Key ב-Railway.");
+        ctx.reply("משהו השתבש בדרך...");
     }
 });
 
-// --- חיבור לשרת (עבור Railway) ---
-
-// נתיב בסיסי כדי ש-Railway ידע שהשרת חי
-app.get("/", (req, res) => res.send("OpenClaw Agent is Online! 🚀"));
-
+// --- 5. הרצה ---
+app.get("/", (req, res) => res.send("Agent System v1.1 Online! 🚀"));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-    
-    // הפעלת הבוט בשיטת Polling (הכי פשוט ויציב ל-Railway בשלב זה)
     bot.launch();
-    console.log("Telegram Bot started");
+    console.log("Super-Agent started");
 });
-
-// סגירה נקייה
-process.once("SIGINT", () => bot.stop("SIGINT"));
-process.once("SIGTERM", () => bot.stop("SIGTERM"));
