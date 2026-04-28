@@ -140,10 +140,52 @@ bot.command('login', async (ctx) => {
 });
 bot.command('testsummary', async (ctx) => {
     if (!ALLOWED_USERS.includes(ctx.chat.id)) return;
-    ctx.reply("מריץ בדיקה לסיכום הבוקר... ⏳");
     
-    // כאן פשוט תעתיק את כל התוכן שיש בתוך ה-cron.schedule
-    // (החלק שמתחיל מ-const calendar = ... ועד הסוף)
+    await ctx.reply("מריץ בדיקה מעמיקה לסיכום הבוקר... ⏳");
+    console.log("🔍 התחלת בדיקת סיכום עבור ID:", ctx.chat.id);
+    
+    try {
+        const calendar = await getGoogleAuth(ctx.chat.id);
+        
+        if (!calendar) {
+            console.error("❌ לא נמצא חיבור לגוגל ב-Supabase");
+            return ctx.reply("שגיאה: לא מצאתי הרשאת גישה ליומן שלך. נסה להריץ /login שוב.");
+        }
+
+        const now = new Date();
+        const startOfDay = new Date(now.setHours(0, 0, 0, 0)).toISOString();
+        const endOfDay = new Date(now.setHours(23, 59, 59, 999)).toISOString();
+
+        console.log("📅 שולף אירועים בין:", startOfDay, "ל-", endOfDay);
+
+        const res = await calendar.events.list({
+            calendarId: 'primary',
+            timeMin: startOfDay,
+            timeMax: endOfDay,
+            singleEvents: true,
+            orderBy: 'startTime',
+        });
+
+        const events = res.data.items || [];
+        console.log(`✅ נמצאו ${events.length} אירועים`);
+
+        let message = "🌞 **בדיקת סיכום בוקר:**\n\n";
+        
+        if (events.length > 0) {
+            events.forEach(e => {
+                const startTime = e.start.dateTime ? new Date(e.start.dateTime).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' }) : "כל היום";
+                message += `• ${startTime} - ${e.summary}\n`;
+            });
+        } else {
+            message += "אין פגישות להיום ביומן.";
+        }
+
+        await ctx.reply(message, { parse_mode: 'Markdown' });
+
+    } catch (err) {
+        console.error("❌ שגיאה בבדיקת הסיכום:", err.message);
+        await ctx.reply(`קרסה שגיאה בבדיקה: ${err.message}`);
+    }
 });
 
 app.get("/oauth2callback", async (req, res) => {
