@@ -22,18 +22,20 @@ const tvly = tavily({ apiKey: process.env.TAVILY_API_KEY });
 
 const ALLOWED_USERS = [291735216];
 
-// הגדרת גוגל
 const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
     process.env.REDIRECT_URI
 );
 
-// --- פונקציות עזר (גוגל, זיכרון, חיפוש) ---
+// --- פונקציות עזר ---
 
 async function getGoogleAuth(chatId) {
-    const { data } = await supabase.from('user_tokens').select('tokens').eq('chat_id', chatId).single();
-    if (!data) return null;
+    const { data, error } = await supabase.from('user_tokens').select('tokens').eq('chat_id', chatId).single();
+    if (error || !data) {
+        console.log("❌ לא נמצא טוקן ב-Supabase עבור המשתמש");
+        return null;
+    }
     oauth2Client.setCredentials(data.tokens);
     return google.calendar({ version: 'v3', auth: oauth2Client });
 }
@@ -47,7 +49,12 @@ async function getHistory(chatId) {
     return data ? data.reverse() : [];
 }
 
-// --- המוח המרכזי ---
+async function searchWeb(query) {
+    const searchResult = await tvly.search(query, { searchDepth: "advanced" });
+    return searchResult.results.map(r => `${r.title}: ${r.content}`).join("\n");
+}
+
+// --- המוח המרכזי (משופר ליומן) ---
 
 async function askAI(ctx, text) {
     const chatId = ctx.chat.id;
@@ -56,29 +63,54 @@ async function askAI(ctx, text) {
         const calendar = await getGoogleAuth(chatId);
         let calendarContext = "";
 
-        // בדיקה אם המשתמש שואל על היומן
-        if (text.includes("יומן") || text.includes("לוח זמנים") || text.includes("פגישה")) {
-            if (!calendar) {
-                return ctx.reply("אני עדיין לא מחובר ליומן שלך. הקלד /login כדי להתחבר.");
+        // בדיקה משופרת - אם יש מילים שקשורות לזמן או פגישות
+        const calendarKeywords = ["יומן", "לוח זמנים", "פגישה", "לו״ז", "מחר", "היום", "שבוע"];
+        const shouldCheckCalendar = calendarKeywords.some(keyword => text.toLowerCase().includes(keyword));
+
+        if (shouldCheckCalendar && calendar) {
+            console.log("📅 ניגש לשלוף אירועים מהיומן...");
+            try {
+                const res = await calendar.events.list({
+                    calendarId: 'primary',
+                    timeMin: new Date().toISOString(), // החל מעכשיו
+                    maxResults: 15, // הגדלנו כדי לראות גם את מחר
+                    singleEvents: true,
+                    orderBy: 'startTime',
+                });
+                
+                if (res.data.items && res.data.items.length > 0) {
+                    calendarContext = res.data.items.map(e => {
+                        const start = e.start.dateTime || e.start.date;
+                        return `- ${e.summary} (מתחיל ב: ${start})`;
+                    }).join("\n");
+                } else {
+                    calendarContext = "אין אירועים קרובים ביומן.";
+                }
+            } catch (err) {
+                console.error("Calendar API Error:", err.message);
+                calendarContext = "שגיאה בגישה ליומן. ייתכן שצריך להתחבר מחדש עם /login.";
             }
-            // שליפת אירועים להיום כברירת מחדל כדי לתת ל-AI הקשר
-            const res = await calendar.events.list({
-                calendarId: 'primary',
-                timeMin: new Date().toISOString(),
-                maxResults: 5,
-                singleEvents: true,
-                orderBy: 'startTime',
-            });
-            calendarContext = res.data.items.map(e => `${e.summary} ב-${e.start.dateTime || e.start.date}`).join("\n");
         }
 
         const history = await getHistory(chatId);
+        const now = new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' });
+
         const response = await openai.chat.completions.create({
             model: "gpt-4o-mini",
             messages: [
-                { role: "system", content: "אתה עוזר אישי חכם עבור מיכאל. יש לך גישה ליומן שלו אם מופיע בהקשר. ענה בעברית מקצועית." },
+                { 
+                    role: "system", 
+                    content: `אתה עוזר אישי חכם עבור מיכאל. 
+                    התאריך והשעה עכשיו הם: ${now}. 
+                    אם המשתמש שואל על מחר, חשב את התאריך לפי השעה הנוכחית. 
+                    קיבלת גישה לנתוני היומן שלו במידה והם מופיעים בהקשר - השתמש בהם כדי לענות. 
+                    אל תגיד 'אני צריך גישה' אם כבר סיפקו לך נתונים.` 
+                },
                 ...history,
-                { role: "user", content: calendarContext ? `אירועים קרובים ביומן:\n${calendarContext}\n\nשאלה: ${text}` : text }
+                { 
+                    role: "user", 
+                    content: calendarContext ? `להלן רשימת האירועים מהיומן שלי:\n${calendarContext}\n\nשאלה: ${text}` : text 
+                }
             ],
         });
 
@@ -86,8 +118,10 @@ async function askAI(ctx, text) {
         await saveMessage(chatId, "user", text);
         await saveMessage(chatId, "assistant", reply);
         await ctx.reply(reply);
+
     } catch (error) {
-        ctx.reply("חלה שגיאה בעיבוד. וודא שהתחברת ליומן עם /login");
+        console.error("Global Error:", error);
+        ctx.reply("משהו השתבש בעיבוד הבקשה.");
     }
 }
 
@@ -97,10 +131,11 @@ bot.command('login', async (ctx) => {
     if (!ALLOWED_USERS.includes(ctx.chat.id)) return;
     const url = oauth2Client.generateAuthUrl({
         access_type: 'offline',
-        scope: ['https://www.googleapis.com/auth/calendar'],
+        prompt: 'consent', // מכריח קבלת Refresh Token
+        scope: ['https://www.googleapis.com/auth/calendar.readonly', 'https://www.googleapis.com/auth/calendar.events'],
         state: ctx.chat.id.toString()
     });
-    ctx.reply(`לחץ כאן כדי לאשר לי גישה ליומן:\n${url}`);
+    ctx.reply(`לחץ כאן כדי לחבר את היומן:\n${url}`);
 });
 
 app.get("/oauth2callback", async (req, res) => {
@@ -109,7 +144,7 @@ app.get("/oauth2callback", async (req, res) => {
         const { tokens } = await oauth2Client.getToken(code);
         await supabase.from('user_tokens').upsert({ chat_id: parseInt(state), tokens });
         res.send("התחברת בהצלחה! אפשר לחזור לטלגרם.");
-        bot.telegram.sendMessage(parseInt(state), "מעולה! אני מחובר ליומן שלך. מה תרצה לדעת?");
+        bot.telegram.sendMessage(parseInt(state), "מעולה! עכשיו אני רואה את היומן שלך. שאל אותי למשל: 'איזה פגישות יש לי מחר?'");
     } catch (err) { res.send("שגיאה בהתחברות."); }
 });
 
@@ -123,9 +158,10 @@ bot.on('voice', async (ctx) => {
         const downloadRes = await axios.get(fileLink.href, { responseType: 'arraybuffer' });
         fs.writeFileSync(tempFilePath, Buffer.from(downloadRes.data));
         const transcription = await openai.audio.transcriptions.create({ file: fs.createReadStream(tempFilePath), model: "whisper-1" });
-        await ctx.reply(`אמרת: "${transcription.text}"`);
+        await ctx.reply(`🎤: "${transcription.text}"`);
         await askAI(ctx, transcription.text);
-    } finally { if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath); }
+    } catch (err) { ctx.reply("שגיאה בתמלול הקול."); }
+    finally { if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath); }
 });
 
 bot.on('photo', async (ctx) => {
@@ -136,11 +172,11 @@ bot.on('photo', async (ctx) => {
         const base64Image = Buffer.from(response.data, 'binary').toString('base64');
         const aiRes = await openai.chat.completions.create({
             model: "gpt-4o-mini",
-            messages: [{ role: "user", content: [{ type: "text", text: "מה בתמונה?" }, { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Image}` } }] }]
+            messages: [{ role: "user", content: [{ type: "text", text: "נתח את התמונה עבור מיכאל." }, { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Image}` } }] }]
         });
         ctx.reply(aiRes.choices[0].message.content);
     } catch (err) { ctx.reply("שגיאה בניתוח תמונה."); }
 });
 
-app.get("/", (req, res) => res.send("Super-Agent v1.5 Calendar Ready! 🚀"));
-app.listen(process.env.PORT || 3000, () => { bot.launch(); console.log("Bot started with Google Calendar support."); });
+app.get("/", (req, res) => res.send("Super-Agent v1.5.1 Calendar Pro Online! 🚀"));
+app.listen(process.env.PORT || 3000, () => { bot.launch(); console.log("Bot started with Enhanced Calendar Logic."); });
