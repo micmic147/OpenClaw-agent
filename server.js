@@ -23,17 +23,24 @@ const ALLOWED_USERS = [291735216]; // ה-ID שלך
 
 // שמירת הודעה בזיכרון הקבוע של Supabase
 async function saveMessage(chatId, role, content) {
-    await supabase.from('messages').insert([{ chat_id: chatId, role, content }]);
+    const { error } = await supabase.from('messages').insert([{ chat_id: chatId, role, content }]);
+    if (error) console.error("❌ שגיאה בשמירה ל-Supabase:", error.message);
+    else console.log("✅ הודעה נשמרה בזיכרון");
 }
 
-// שליפת היסטוריה מ-Supabase
 async function getHistory(chatId) {
-    const { data } = await supabase
+    const { data, error } = await supabase
         .from('messages')
         .select('role, content')
         .eq('chat_id', chatId)
         .order('created_at', { ascending: false })
         .limit(10);
+    
+    if (error) {
+        console.error("❌ שגיאה בשליפה מ-Supabase:", error.message);
+        return [];
+    }
+    console.log(`✅ נשלפו ${data?.length || 0} הודעות מהיסטוריית הצ'אט`);
     return data ? data.reverse() : [];
 }
 
