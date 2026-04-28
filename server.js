@@ -180,4 +180,46 @@ bot.on('photo', async (ctx) => {
 });
 
 app.get("/", (req, res) => res.send("Super-Agent v1.5.1 Calendar Pro Online! 🚀"));
+// משימה אוטומטית שרצה כל בוקר ב-08:00 (לפי שעון ישראל)
+cron.schedule('0 8 * * *', async () => {
+    const chatId = 291735216; // ה-ID שלך
+    console.log("⏰ מריץ סיכום בוקר אוטומטי...");
+    
+    try {
+        const calendar = await getGoogleAuth(chatId);
+        if (!calendar) return;
+
+        const now = new Date();
+        const startOfDay = new Date(now.setHours(0, 0, 0, 0)).toISOString();
+        const endOfDay = new Date(now.setHours(23, 59, 59, 999)).toISOString();
+
+        const res = await calendar.events.list({
+            calendarId: 'primary',
+            timeMin: startOfDay,
+            timeMax: endOfDay,
+            singleEvents: true,
+            orderBy: 'startTime',
+        });
+
+        let message = "🌞 **בוקר טוב מיכאל! הנה הלו״ז שלך להיום:**\n\n";
+        
+        if (res.data.items && res.data.items.length > 0) {
+            res.data.items.forEach(e => {
+                const startTime = e.start.dateTime ? new Date(e.start.dateTime).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' }) : "כל היום";
+                message += `• ${startTime} - ${e.summary}\n`;
+            });
+        } else {
+            message += "אין לך פגישות מתוכננות להיום. זמן מצוין להתמקד בפיתוח! 🚀";
+        }
+
+        // שליחת הודעת מחקר קטנה (בונוס)
+        message += "\n\n💡 **טיפ יומי:** כדאי לבדוק היום את נתוני ה-Conversion ב-Dashboard החדש.";
+
+        await bot.telegram.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+    } catch (err) {
+        console.error("Cron Job Error:", err.message);
+    }
+}, {
+    timezone: "Asia/Jerusalem"
+});
 app.listen(process.env.PORT || 3000, () => { bot.launch(); console.log("Bot started with Enhanced Calendar Logic."); });
