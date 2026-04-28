@@ -138,6 +138,13 @@ bot.command('login', async (ctx) => {
     });
     ctx.reply(`לחץ כאן כדי לחבר את היומן:\n${url}`);
 });
+bot.command('testsummary', async (ctx) => {
+    if (!ALLOWED_USERS.includes(ctx.chat.id)) return;
+    ctx.reply("מריץ בדיקה לסיכום הבוקר... ⏳");
+    
+    // כאן פשוט תעתיק את כל התוכן שיש בתוך ה-cron.schedule
+    // (החלק שמתחיל מ-const calendar = ... ועד הסוף)
+});
 
 app.get("/oauth2callback", async (req, res) => {
     const { code, state } = req.query;
